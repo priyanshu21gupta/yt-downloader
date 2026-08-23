@@ -27,6 +27,7 @@ app.use(cors({
     }
   },
 }));
+
 app.use(express.json());
 
 const sseClients = new Map();
@@ -35,6 +36,7 @@ const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
 function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
     const args = ["-j", "--no-warnings", "--skip-download", url];
+    console.log("Spawning yt-dlp with args:", args);
     const proc = spawn("yt-dlp", args, { env: spawnEnv });
 
     let data = "";
@@ -43,13 +45,22 @@ function fetchMetadata(url) {
     proc.stdout.on("data", (chunk) => (data += chunk));
     proc.stderr.on("data", (chunk) => (error += chunk));
 
+    proc.on("error", (err) => {
+      console.log("Spawn error (yt-dlp not found?):", err.message);
+      reject(new Error("yt-dlp could not be started: " + err.message));
+    });
+
     proc.on("close", (code) => {
+      console.log("yt-dlp metadata process closed with code:", code);
+      if (error) console.log("yt-dlp stderr output:", error);
+
       if (code !== 0) {
         return reject(new Error(error || "yt-dlp failed to fetch metadata"));
       }
       try {
         resolve(JSON.parse(data));
       } catch (e) {
+        console.log("JSON parse failed. Raw data was:", data);
         reject(new Error("Failed to parse video metadata"));
       }
     });
@@ -57,14 +68,20 @@ function fetchMetadata(url) {
 }
 
 app.post("/api/metadata", async (req, res) => {
+  console.log("=== Metadata request received ===");
+  console.log("Body:", req.body);
+
   const { url } = req.body;
 
   if (!isValidYouTubeUrl(url)) {
+    console.log("Invalid URL rejected:", url);
     return res.status(400).json({ error: "Invalid YouTube URL" });
   }
 
   try {
+    console.log("Calling yt-dlp for:", url);
     const info = await fetchMetadata(url);
+    console.log("yt-dlp succeeded, title:", info.title);
 
     if (info.is_live) {
       return res.status(422).json({ error: "Live streams cannot be downloaded" });
@@ -79,6 +96,7 @@ app.post("/api/metadata", async (req, res) => {
       isAgeRestricted: info.age_limit > 0,
     });
   } catch (err) {
+    console.log("yt-dlp FAILED with error:", err.message);
     res.status(500).json({ error: classifyError(err.message) });
   }
 });
@@ -157,6 +175,7 @@ app.get("/api/download", (req, res) => {
 
     proc.on("close", (code) => {
       console.log("AUDIO yt-dlp closed with code:", code);
+      if (code !== 0) console.log("AUDIO stderr:", stderrLog);
       if (downloadId && sseClients.has(downloadId)) {
         const client = sseClients.get(downloadId);
         client.write(`data: ${JSON.stringify({ percent: 100, done: true })}\n\n`);
@@ -228,6 +247,7 @@ app.get("/api/download", (req, res) => {
 
   proc.on("close", (code) => {
     console.log("VIDEO yt-dlp closed with code:", code);
+    if (code !== 0) console.log("VIDEO stderr:", stderrLog);
 
     if (code !== 0) {
       if (downloadId && sseClients.has(downloadId)) {
