@@ -4,7 +4,7 @@ import VideoCard from "./components/VideoCard";
 import Skeleton from "./components/Skeleton";
 import ProgressBar from "./components/ProgressBar";
 
-const API_BASE = "http://localhost:5000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5000";
 
 export default function App() {
   const [url, setUrl] = useState("");
