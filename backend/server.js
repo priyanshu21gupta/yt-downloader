@@ -33,10 +33,13 @@ app.use(express.json({ limit: "10kb" }));
 
 const sseClients = new Map();
 const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
+// The Android client provides a broadly compatible fallback for server-hosted
+// YouTube requests, including Shorts that may fail with the default web client.
+const youtubePlayerArgs = ["--extractor-args", "youtube:player_client=android"];
 
 function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
-    const args = ["-j", "--no-warnings", "--skip-download", url];
+    const args = ["-j", "--no-warnings", "--skip-download", ...youtubePlayerArgs, url];
     console.log("Spawning yt-dlp with args:", args);
     const proc = spawn("yt-dlp", args, { env: spawnEnv, timeout: PROCESS_TIMEOUT_MS });
 
@@ -146,6 +149,7 @@ app.get("/api/download", (req, res) => {
       "-x",
       "--audio-format", "mp3",
       "--audio-quality", audioBitrate === "320" ? "320k" : "128k",
+      ...youtubePlayerArgs,
       url,
     ];
 
@@ -228,6 +232,7 @@ app.get("/api/download", (req, res) => {
     "--progress",
     "-f", formatArg,
     "--merge-output-format", "mp4",
+    ...youtubePlayerArgs,
     url,
   ];
 
