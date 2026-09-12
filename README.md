@@ -1,2 +1,2 @@
 # yt-downloader
-Download you tube videos in your gallary
+Download your tube videos in your gallary
