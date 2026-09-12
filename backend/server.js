@@ -33,14 +33,16 @@ app.use(express.json({ limit: "10kb" }));
 
 const sseClients = new Map();
 const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
-// The Android client provides a broadly compatible fallback for server-hosted
-// YouTube requests, including Shorts that may fail with the default web client.
-const youtubePlayerArgs = ["--extractor-args", "youtube:player_client=android"];
 // Set YTDLP_COOKIES_PATH to a platform-managed secret file when YouTube
 // requires authentication for a hosted server IP.
 const youtubeCookiesArgs = process.env.YTDLP_COOKIES_PATH
   ? ["--cookies", process.env.YTDLP_COOKIES_PATH]
   : [];
+// Browser cookies are intended for yt-dlp's normal web client. Without
+// cookies, Android provides a useful fallback for some hosted server IPs.
+const youtubePlayerArgs = youtubeCookiesArgs.length
+  ? []
+  : ["--extractor-args", "youtube:player_client=android"];
 
 function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
