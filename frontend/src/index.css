@@ -4,4 +4,5 @@
 
   body {
     @apply bg-bg text-gray-100;
+    min-width: 320px;
   }

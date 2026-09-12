@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import UrlInput from "./components/UrlInput";
 import VideoCard from "./components/VideoCard";
 import Skeleton from "./components/Skeleton";
@@ -21,6 +21,16 @@ export default function App() {
 
   const eventSourceRef = useRef(null);
   const iframeRef = useRef(null);
+  const downloadFinishedRef = useRef(false);
+
+  const clearDownload = () => {
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    if (iframeRef.current?.isConnected) iframeRef.current.remove();
+    iframeRef.current = null;
+  };
+
+  useEffect(() => clearDownload, []);
 
   const handleFetch = async () => {
     setError("");
@@ -45,39 +55,15 @@ export default function App() {
   };
 
   const handleDownload = () => {
+    clearDownload();
     const downloadId = crypto.randomUUID();
+    downloadFinishedRef.current = false;
     setDownloadState("downloading");
     setProgress(0);
     setSpeedInfo({ speed: null, eta: null });
 
     const es = new EventSource(`${API_BASE}/api/progress/${downloadId}`);
     eventSourceRef.current = es;
-
-    es.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      setProgress(data.percent);
-      setSpeedInfo({ speed: data.speed, eta: data.eta });
-
-      if (data.done) {
-        es.close();
-        setTimeout(() => {
-          setDownloadState("idle");
-          setProgress(0);
-          setSpeedInfo({ speed: null, eta: null });
-          if (iframeRef.current) {
-            document.body.removeChild(iframeRef.current);
-            iframeRef.current = null;
-          }
-        }, 1000);
-      }
-    };
-
-    es.onerror = () => {
-      es.close();
-      setDownloadState("idle");
-      setProgress(0);
-      setSpeedInfo({ speed: null, eta: null });
-    };
 
     const params = new URLSearchParams({
       url,
@@ -88,13 +74,50 @@ export default function App() {
       title: video?.title || "video",
     });
 
-    const downloadUrl = `${API_BASE}/api/download?${params.toString()}`;
+    es.onopen = () => {
+      const iframe = document.createElement("iframe");
+      iframe.hidden = true;
+      iframe.src = `${API_BASE}/api/download?${params.toString()}`;
+      document.body.appendChild(iframe);
+      iframeRef.current = iframe;
+    };
 
-    const iframe = document.createElement("iframe");
-    iframe.style.display = "none";
-    iframe.src = downloadUrl;
-    document.body.appendChild(iframe);
-    iframeRef.current = iframe;
+    es.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.error) {
+        downloadFinishedRef.current = true;
+        clearDownload();
+        setDownloadState("idle");
+        setProgress(0);
+        setSpeedInfo({ speed: null, eta: null });
+        setError(data.error);
+        return;
+      }
+
+      setProgress(Math.max(0, Math.min(data.percent ?? 0, 100)));
+      setSpeedInfo({ speed: data.speed, eta: data.eta });
+
+      if (data.done) {
+        downloadFinishedRef.current = true;
+        setTimeout(() => {
+          setDownloadState("idle");
+          setProgress(0);
+          setSpeedInfo({ speed: null, eta: null });
+          clearDownload();
+        }, 1000);
+      }
+    };
+
+    es.onerror = () => {
+      if (downloadFinishedRef.current) return;
+      es.close();
+      clearDownload();
+      setDownloadState("idle");
+      setProgress(0);
+      setSpeedInfo({ speed: null, eta: null });
+      setError("Download could not be completed. Please try again.");
+    };
   };
 
   return (
@@ -120,7 +143,6 @@ export default function App() {
           <div className="w-full max-w-xl">
             <VideoCard
               video={video}
-              url={url}
               downloadState={downloadState}
               onDownload={handleDownload}
               formatState={{ mode, setMode, quality, setQuality, bitrate, setBitrate }}

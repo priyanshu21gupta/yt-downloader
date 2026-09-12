@@ -12,11 +12,12 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const PROCESS_TIMEOUT_MS = 10 * 60 * 1000;
 
 const allowedOrigins = [
   "http://localhost:5173",
   process.env.FRONTEND_URL,
-];
+].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -28,7 +29,7 @@ app.use(cors({
   },
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: "10kb" }));
 
 const sseClients = new Map();
 const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
@@ -37,7 +38,7 @@ function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
     const args = ["-j", "--no-warnings", "--skip-download", url];
     console.log("Spawning yt-dlp with args:", args);
-    const proc = spawn("yt-dlp", args, { env: spawnEnv });
+    const proc = spawn("yt-dlp", args, { env: spawnEnv, timeout: PROCESS_TIMEOUT_MS });
 
     let data = "";
     let error = "";
@@ -101,6 +102,10 @@ app.post("/api/metadata", async (req, res) => {
   }
 });
 
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
+
 app.get("/api/progress/:id", (req, res) => {
   const { id } = req.params;
 
@@ -125,6 +130,13 @@ app.get("/api/download", (req, res) => {
     return res.status(400).json({ error: "Invalid YouTube URL" });
   }
 
+  if (audioOnly !== "true" && !["1080p", "720p", "480p"].includes(quality)) {
+    return res.status(400).json({ error: "Invalid video quality" });
+  }
+  if (audioOnly === "true" && !["128", "320"].includes(audioBitrate)) {
+    return res.status(400).json({ error: "Invalid audio bitrate" });
+  }
+
   if (audioOnly === "true") {
     const args = [
       "-o", "-",
@@ -144,7 +156,7 @@ app.get("/api/download", (req, res) => {
     );
     res.setHeader("Content-Type", "application/octet-stream");
 
-    const proc = spawn("yt-dlp", args, { env: spawnEnv });
+    const proc = spawn("yt-dlp", args, { env: spawnEnv, timeout: PROCESS_TIMEOUT_MS });
     proc.stdout.pipe(res);
 
     let stderrLog = "";
@@ -177,18 +189,25 @@ app.get("/api/download", (req, res) => {
       console.log("AUDIO yt-dlp closed with code:", code);
       if (code !== 0) console.log("AUDIO stderr:", stderrLog);
       if (downloadId && sseClients.has(downloadId)) {
-        const client = sseClients.get(downloadId);
-        client.write(`data: ${JSON.stringify({ percent: 100, done: true })}\n\n`);
-        client.end();
-        sseClients.delete(downloadId);
+        if (code === 0) {
+          finishProgress(downloadId, { percent: 100, done: true });
+        }
       }
       if (code !== 0 && !res.headersSent) {
         res.status(500).json({ error: classifyError(stderrLog) });
       }
+      if (code !== 0) finishProgress(downloadId, { error: classifyError(stderrLog) });
     });
 
-    req.on("close", () => {
-      if (!proc.killed) proc.kill("SIGKILL");
+    proc.on("error", (err) => {
+      console.error("AUDIO process error:", err.message);
+      finishProgress(downloadId, { error: "The download process could not be started." });
+      if (!res.headersSent) res.status(500).json({ error: "Download process failed to start" });
+    });
+
+    res.on("close", () => {
+      // Only cancel if the browser disconnected before the streamed response finished.
+      if (!res.writableEnded && !proc.killed) proc.kill("SIGKILL");
     });
 
     return;
@@ -212,7 +231,7 @@ app.get("/api/download", (req, res) => {
     url,
   ];
 
-  const proc = spawn("yt-dlp", args, { env: spawnEnv });
+  const proc = spawn("yt-dlp", args, { env: spawnEnv, timeout: PROCESS_TIMEOUT_MS });
 
   let stderrLog = "";
   let lineBuffer = "";
@@ -242,6 +261,8 @@ app.get("/api/download", (req, res) => {
 
   proc.on("error", (err) => {
     console.log("VIDEO process error:", err);
+    fs.unlink(tempFilePath, () => {});
+    finishProgress(downloadId, { error: "The download process could not be started." });
     if (!res.headersSent) res.status(500).json({ error: "Download process failed to start" });
   });
 
@@ -250,15 +271,20 @@ app.get("/api/download", (req, res) => {
     if (code !== 0) console.log("VIDEO stderr:", stderrLog);
 
     if (code !== 0) {
-      if (downloadId && sseClients.has(downloadId)) {
-        sseClients.get(downloadId).end();
-        sseClients.delete(downloadId);
-      }
-      if (!res.headersSent) res.status(500).json({ error: classifyError(stderrLog) });
+      fs.unlink(tempFilePath, () => {});
+      const error = classifyError(stderrLog);
+      finishProgress(downloadId, { error });
+      if (!res.headersSent) res.status(500).json({ error });
       return;
     }
 
-    const videoFileName = `${sanitizeFilename(title)} [${quality || "720p"}].mp4`;
+    if (!fs.existsSync(tempFilePath)) {
+      const error = "Downloaded file could not be found.";
+      finishProgress(downloadId, { error });
+      return res.status(500).json({ error });
+    }
+
+    const videoFileName = `${sanitizeFilename(title)} [${quality}].mp4`;
     const stats = fs.statSync(tempFilePath);
 
     res.setHeader(
@@ -274,18 +300,30 @@ app.get("/api/download", (req, res) => {
     readStream.on("close", () => {
       fs.unlink(tempFilePath, () => {});
       if (downloadId && sseClients.has(downloadId)) {
-        const client = sseClients.get(downloadId);
-        client.write(`data: ${JSON.stringify({ percent: 100, done: true })}\n\n`);
-        client.end();
-        sseClients.delete(downloadId);
+        finishProgress(downloadId, { percent: 100, done: true });
       }
+    });
+
+    readStream.on("error", (err) => {
+      console.error("File stream error:", err.message);
+      fs.unlink(tempFilePath, () => {});
+      finishProgress(downloadId, { error: "The downloaded file could not be read." });
+      res.destroy(err);
     });
   });
 
-  req.on("close", () => {
-    if (!proc.killed) proc.kill("SIGKILL");
+  res.on("close", () => {
+    // `req.close` can fire once the GET request body is consumed, which is
+    // before yt-dlp finishes. `res.close` reliably represents a disconnected client.
+    if (!res.writableEnded && !proc.killed) proc.kill("SIGKILL");
   });
 });
+
+function finishProgress(downloadId, payload) {
+  if (!downloadId || !sseClients.has(downloadId)) return;
+  const client = sseClients.get(downloadId);
+  client.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
 
 function formatDuration(seconds) {
   if (!seconds) return "N/A";
@@ -300,8 +338,8 @@ function formatDuration(seconds) {
 function sanitizeFilename(name) {
   if (!name) return "video";
   const cleaned = name
-    .replace(/[/\\?%*:|"<>]/g, "")
-    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, "")
+    .replace(/[. ]+$/, "")
     .trim()
     .slice(0, 150);
   return cleaned || "video";
@@ -314,6 +352,9 @@ function classifyError(msg = "") {
   if (lower.includes("live event")) return "Live streams cannot be downloaded.";
   if (lower.includes("video unavailable")) return "This video is unavailable or has been removed.";
   if (lower.includes("unsupported url")) return "Invalid or unsupported YouTube URL.";
+  if (lower.includes("ffmpeg") && lower.includes("not found")) return "FFmpeg was not found. Install it and restart the backend.";
+  if (lower.includes("requested format is not available")) return "The selected quality is not available for this video.";
+  if (lower.includes("unable to download api page") || lower.includes("proxyerror")) return "YouTube could not be reached. Check your internet or proxy settings.";
   return "Something went wrong while processing this video.";
 }
 
