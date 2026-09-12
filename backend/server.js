@@ -35,8 +35,23 @@ const sseClients = new Map();
 const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
 // Set YTDLP_COOKIES_PATH to a platform-managed secret file when YouTube
 // requires authentication for a hosted server IP.
-const youtubeCookiesArgs = process.env.YTDLP_COOKIES_PATH
-  ? ["--cookies", process.env.YTDLP_COOKIES_PATH]
+const configuredCookiesPath = process.env.YTDLP_COOKIES_PATH;
+const runtimeCookiesPath = configuredCookiesPath
+  ? path.join(os.tmpdir(), "yt-dlp-cookies.txt")
+  : null;
+
+if (configuredCookiesPath) {
+  try {
+    // Render mounts secret files read-only, but yt-dlp updates its cookie jar.
+    // Copy it to a writable temporary path before handing it to yt-dlp.
+    fs.copyFileSync(configuredCookiesPath, runtimeCookiesPath);
+  } catch (err) {
+    console.error("Could not prepare the configured yt-dlp cookie file:", err.message);
+  }
+}
+
+const youtubeCookiesArgs = runtimeCookiesPath && fs.existsSync(runtimeCookiesPath)
+  ? ["--cookies", runtimeCookiesPath]
   : [];
 // Browser cookies are intended for yt-dlp's normal web client. Without
 // cookies, Android provides a useful fallback for some hosted server IPs.
