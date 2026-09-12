@@ -36,10 +36,15 @@ const spawnEnv = { ...process.env, PYTHONUNBUFFERED: "1" };
 // The Android client provides a broadly compatible fallback for server-hosted
 // YouTube requests, including Shorts that may fail with the default web client.
 const youtubePlayerArgs = ["--extractor-args", "youtube:player_client=android"];
+// Set YTDLP_COOKIES_PATH to a platform-managed secret file when YouTube
+// requires authentication for a hosted server IP.
+const youtubeCookiesArgs = process.env.YTDLP_COOKIES_PATH
+  ? ["--cookies", process.env.YTDLP_COOKIES_PATH]
+  : [];
 
 function fetchMetadata(url) {
   return new Promise((resolve, reject) => {
-    const args = ["-j", "--no-warnings", "--skip-download", ...youtubePlayerArgs, url];
+    const args = ["-j", "--no-warnings", "--skip-download", ...youtubePlayerArgs, ...youtubeCookiesArgs, url];
     console.log("Spawning yt-dlp with args:", args);
     const proc = spawn("yt-dlp", args, { env: spawnEnv, timeout: PROCESS_TIMEOUT_MS });
 
@@ -150,6 +155,7 @@ app.get("/api/download", (req, res) => {
       "--audio-format", "mp3",
       "--audio-quality", audioBitrate === "320" ? "320k" : "128k",
       ...youtubePlayerArgs,
+      ...youtubeCookiesArgs,
       url,
     ];
 
@@ -233,6 +239,7 @@ app.get("/api/download", (req, res) => {
     "-f", formatArg,
     "--merge-output-format", "mp4",
     ...youtubePlayerArgs,
+    ...youtubeCookiesArgs,
     url,
   ];
 
@@ -354,6 +361,9 @@ function classifyError(msg = "") {
   const lower = msg.toLowerCase();
   if (lower.includes("private video")) return "This video is private and cannot be accessed.";
   if (lower.includes("sign in to confirm your age")) return "This video is age-restricted.";
+  if (lower.includes("sign in to confirm") && lower.includes("not a bot")) {
+    return "YouTube blocked this server request. Configure authenticated yt-dlp cookies for this hosted service.";
+  }
   if (lower.includes("live event")) return "Live streams cannot be downloaded.";
   if (lower.includes("video unavailable")) return "This video is unavailable or has been removed.";
   if (lower.includes("unsupported url")) return "Invalid or unsupported YouTube URL.";
